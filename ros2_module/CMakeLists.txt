@@ -36,6 +36,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install leap_hand_utils Python module alongside the scripts
+install(DIRECTORY scripts/leap_hand_utils/
+  DESTINATION lib/${PROJECT_NAME}/leap_hand_utils
+)
+
 # Install launch files
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch

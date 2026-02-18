@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+import sys
+import os
+# Add script directory to path so leap_hand_utils is importable
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -25,10 +30,11 @@ class LeapNode(Node):
     def __init__(self):
         super().__init__('leaphand_node')
         # Some parameters to control the hand
-        self.kP = self.declare_parameter('kP', 800.0).get_parameter_value().double_value
-        self.kI = self.declare_parameter('kI', 0.0).get_parameter_value().double_value
-        self.kD = self.declare_parameter('kD', 200.0).get_parameter_value().double_value
-        self.curr_lim = self.declare_parameter('curr_lim', 350.0).get_parameter_value().double_value
+        self.kP = self.declare_parameter('kP').get_parameter_value().double_value
+        self.kI = self.declare_parameter('kI').get_parameter_value().double_value
+        self.kD = self.declare_parameter('kD').get_parameter_value().double_value
+        self.curr_lim = self.declare_parameter('curr_lim').get_parameter_value().double_value
+        poll_hz = self.declare_parameter('poll_hz').get_parameter_value().double_value
         self.ema_amount = 0.2
         self.prev_pos = self.pos = self.curr_pos = lhu.allegro_to_LEAPhand(np.zeros(16))
 
@@ -37,26 +43,22 @@ class LeapNode(Node):
         self.create_subscription(JointState, 'cmd_allegro', self._receive_allegro, 10)
         self.create_subscription(JointState, 'cmd_ones', self._receive_ones, 10)
 
+        # Publish joint states at a fixed rate (single Dynamixel read, many subscribers)
+        self.joint_state_pub = self.create_publisher(JointState, 'leap_joint_states', 10)
+        self.joint_names = [f'motor_{i}' for i in range(16)]
+        self.create_timer(1.0 / poll_hz, self._publish_joint_states)
+
         # Creates services that can give information about the hand out
         self.create_service(LeapPosition, 'leap_position', self.pos_srv)
         self.create_service(LeapVelocity, 'leap_velocity', self.vel_srv)
         self.create_service(LeapEffort, 'leap_effort', self.eff_srv)
         self.create_service(LeapPosVelEff, 'leap_pos_vel_eff', self.pos_vel_eff_srv)
         self.create_service(LeapPosVelEff, 'leap_pos_vel', self.pos_vel_srv)
-        # You can put the correct port here or have the node auto-search for a hand at the first 3 ports.
-        # For example ls /dev/serial/by-id/* to find your LEAP Hand. Then use the result.  
-        # For example: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7W91VW-if00-port0
         self.motors = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
-        try:
-            self.dxl_client = DynamixelClient(self.motors, '/dev/ttyUSB0', 4000000)
-            self.dxl_client.connect()
-        except Exception:
-            try:
-                self.dxl_client = DynamixelClient(self.motors, '/dev/ttyUSB1', 4000000)
-                self.dxl_client.connect()
-            except Exception:
-                self.dxl_client = DynamixelClient(self.motors, '/dev/ttyUSB2', 4000000)
-                self.dxl_client.connect()
+        port = self.declare_parameter('port').get_parameter_value().string_value
+        self.get_logger().info(f'Connecting to LEAP Hand on {port}')
+        self.dxl_client = DynamixelClient(self.motors, port, 4000000)
+        self.dxl_client.connect()
 
         # Enables position-current control mode and the default parameters
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * 5, 11, 1)
@@ -92,6 +94,15 @@ class LeapNode(Node):
         self.prev_pos = self.curr_pos
         self.curr_pos = np.array(pose)
         self.dxl_client.write_desired_pos(self.motors, self.curr_pos)
+
+    def _publish_joint_states(self):
+        """Timer callback: read positions and publish in sim frame (0 = home)."""
+        pos = self.dxl_client.read_pos()
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = self.joint_names
+        msg.position = lhu.LEAPhand_to_LEAPsim(pos).tolist()
+        self.joint_state_pub.publish(msg)
 
     # Service that reads and returns the pos of the robot in regular LEAP Embodiment scaling.
     def pos_srv(self, request, response):

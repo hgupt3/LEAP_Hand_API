@@ -331,7 +331,12 @@ class DynamixelClient:
                     dxl_id, error_message)
             if context is not None:
                 error_message = '> {}: {}'.format(context, error_message)
-            logging.error(error_message)
+            # Read failures are expected ~2% of the time at 4Mbps and are
+            # handled by returning cached data; only log at debug level.
+            if context == 'read':
+                logging.debug(error_message)
+            else:
+                logging.error(error_message)
             return False
         return True
 
@@ -387,11 +392,7 @@ class DynamixelReader:
         self.client.check_connected()
         success = False
         while not success and retries >= 0:
-            try:
-                comm_result = self.operation.fastSyncRead()
-            except:
-                comm_result = self.operation.txRxPacket()
-                print("Update your Dynamixel_SDK from Github faster reads!")
+            comm_result = self.operation.txRxPacket()
             success = self.client.handle_packet_result(
                 comm_result, context='read')
             retries -= 1
