@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import logging
 import sys
 import os
 # Add script directory to path so leap_hand_utils is importable
@@ -8,12 +9,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from leap_hand_utils.dynamixel_client import DynamixelClient
 import leap_hand_utils.leap_hand_utils as lhu
 from leap_hand.srv import LeapPosition, LeapVelocity, LeapEffort, LeapPosVelEff
+
+_DYN = ParameterDescriptor(dynamic_typing=True)
 
 #LEAP hand conventions:
 #180 is flat out home pose for the index, middle, ring, finger MCPs.
@@ -30,11 +34,11 @@ class LeapNode(Node):
     def __init__(self):
         super().__init__('leaphand_node')
         # Some parameters to control the hand
-        self.kP = self.declare_parameter('kP').get_parameter_value().double_value
-        self.kI = self.declare_parameter('kI').get_parameter_value().double_value
-        self.kD = self.declare_parameter('kD').get_parameter_value().double_value
-        self.curr_lim = self.declare_parameter('curr_lim').get_parameter_value().double_value
-        poll_hz = self.declare_parameter('poll_hz').get_parameter_value().double_value
+        self.kP = self.declare_parameter('kP', descriptor=_DYN).get_parameter_value().double_value
+        self.kI = self.declare_parameter('kI', descriptor=_DYN).get_parameter_value().double_value
+        self.kD = self.declare_parameter('kD', descriptor=_DYN).get_parameter_value().double_value
+        self.curr_lim = self.declare_parameter('curr_lim', descriptor=_DYN).get_parameter_value().double_value
+        poll_hz = self.declare_parameter('poll_hz', descriptor=_DYN).get_parameter_value().double_value
         self.ema_amount = 0.2
         self.prev_pos = self.pos = self.curr_pos = lhu.allegro_to_LEAPhand(np.zeros(16))
 
@@ -55,15 +59,21 @@ class LeapNode(Node):
         self.create_service(LeapPosVelEff, 'leap_pos_vel_eff', self.pos_vel_eff_srv)
         self.create_service(LeapPosVelEff, 'leap_pos_vel', self.pos_vel_srv)
         self.motors = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
-        port = self.declare_parameter('port').get_parameter_value().string_value
+        port = self.declare_parameter('port', descriptor=_DYN).get_parameter_value().string_value
         self.get_logger().info(f'Connecting to LEAP Hand on {port}')
         self.dxl_client = DynamixelClient(self.motors, port, 4000000)
         self.dxl_client.connect()
 
-        # Enables position-current control mode and the default parameters
+        # Enables position-current control mode and the default parameters.
+        # Suppress bus retry noise during init (4Mbps Dynamixel bus is lossy,
+        # retries are expected and not actionable).
+        dxl_logger = logging.getLogger()
+        prev_level = dxl_logger.level
+        dxl_logger.setLevel(logging.CRITICAL)
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * 5, 11, 1)
         self.dxl_client.set_torque_enabled(self.motors, True)
-        self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.kP, 84, 2)  # Pgain stiffness     
+        dxl_logger.setLevel(prev_level)
+        self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.kP, 84, 2)  # Pgain stiffness
         self.dxl_client.sync_write([0,4,8], np.ones(3) * (self.kP * 0.75), 84, 2)  # Pgain stiffness for side to side should be a bit less
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.kI, 82, 2)  # Igain
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.kD, 80, 2)  # Dgain damping
@@ -71,6 +81,7 @@ class LeapNode(Node):
         # Max at current (in unit 1ma) so don't overheat and grip too hard
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.curr_lim, 102, 2)
         self.dxl_client.write_desired_pos(self.motors, self.curr_pos)
+        self.get_logger().info('LEAP Hand connected and ready')
 
     # Receive LEAP pose and directly control the robot.  Fully open here is 180 and increases in this value closes the hand.
     def _receive_pose(self, msg):
@@ -97,7 +108,10 @@ class LeapNode(Node):
 
     def _publish_joint_states(self):
         """Timer callback: read positions and publish in sim frame (0 = home)."""
-        pos = self.dxl_client.read_pos()
+        try:
+            pos = self.dxl_client.read_pos()
+        except Exception:
+            return  # transient bus read error, skip this cycle
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = self.joint_names
@@ -135,10 +149,18 @@ class LeapNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    leaphand_node = LeapNode()
-    rclpy.spin(leaphand_node)
-    leaphand_node.destroy_node()
-    rclpy.shutdown()
+    node = LeapNode()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, Exception):
+        pass
+    finally:
+        logging.getLogger().setLevel(logging.CRITICAL)
+        node.dxl_client.set_torque_enabled(node.motors, False, retries=10)
+        node.dxl_client.disconnect()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
