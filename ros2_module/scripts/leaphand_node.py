@@ -80,6 +80,12 @@ class LeapNode(Node):
         self.dxl_client.sync_write([0,4,8], np.ones(3) * (self.kD * 0.75), 80, 2)  # Dgain damping for side to side should be a bit less
         # Max at current (in unit 1ma) so don't overheat and grip too hard
         self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * self.curr_lim, 102, 2)
+        # Profile Velocity (register 112, 4 bytes) — smooths position moves.
+        # Units: 0.229 rev/min per count.  0 = instant (jerky).
+        profile_velocity = self.declare_parameter('profile_velocity', descriptor=_DYN).get_parameter_value().integer_value
+        if profile_velocity > 0:
+            self.dxl_client.sync_write(self.motors, np.ones(len(self.motors)) * profile_velocity, 112, 4)
+            self.get_logger().info(f'Profile Velocity set to {profile_velocity} ({profile_velocity * 0.229:.1f} rev/min, {profile_velocity * 0.02398:.1f} rad/s)')
         self.dxl_client.write_desired_pos(self.motors, self.curr_pos)
         self.get_logger().info('LEAP Hand connected and ready')
 
